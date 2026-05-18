@@ -64,7 +64,7 @@ def unfreeze_all(model: nn.Module, new_lr: float, optimizer):
     print(f"[unfreeze] All layers unfrozen. New LR for backbone: {new_lr}")
 
 
-class SegmentationTrainer:
+class Trainer:
     """
     Trainer for semantic segmentation models (UNet, DeepLabV3, etc.).
 
@@ -89,6 +89,7 @@ class SegmentationTrainer:
         model_name,
         train_loader,
         val_loader,
+        num_classes,
         config,
     ):
         self.config = config
@@ -97,7 +98,7 @@ class SegmentationTrainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
 
-        self.num_classes = config["num_classes"]
+        self.num_classes = num_classes
 
         print("Preparing training...")
 
