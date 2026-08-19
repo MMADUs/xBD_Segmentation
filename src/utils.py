@@ -56,6 +56,26 @@ class DeviceDataLoader:
         return len(self.dl)
 
 
+def get_class_weights(config, num_classes):
+    """
+    Convert class metadata from config into an ordered CE weight list.
+    """
+    classes = config.get("classes")
+
+    if not classes:
+        return None
+
+    weights = [1.0] * num_classes
+
+    for class_meta in classes.values():
+        class_id = class_meta["id"]
+
+        if 0 <= class_id < num_classes:
+            weights[class_id] = class_meta.get("weight", 1.0)
+
+    return weights
+
+
 def time_formatter(sec_elapsed: float) -> str:
     h = int(sec_elapsed / (60 * 60))
     m = int((sec_elapsed % (60 * 60)) / 60)

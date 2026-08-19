@@ -12,69 +12,10 @@ from torch.optim import AdamW
 from torch.amp import autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from src.utils import time_formatter
+from src.utils import time_formatter, get_class_weights
 from src.callbacks import TrainingCallback, TrainCheckpoint, EarlyStopping
-from src.loss import SegmentationLoss
-
-
-def update_confusion_matrix(confmat, preds, labels, num_classes, ignore_index=-1):
-    """
-    Update a confusion matrix from segmentation predictions without storing pixels.
-    """
-    preds = preds.reshape(-1)
-    labels = labels.reshape(-1)
-
-    if ignore_index >= 0:
-        keep = labels != ignore_index
-        preds = preds[keep]
-        labels = labels[keep]
-
-    valid = (
-        (labels >= 0)
-        & (labels < num_classes)
-        & (preds >= 0)
-        & (preds < num_classes)
-    )
-
-    if valid.any():
-        indices = num_classes * labels[valid] + preds[valid]
-        confmat += torch.bincount(
-            indices,
-            minlength=num_classes**2,
-        ).reshape(num_classes, num_classes)
-
-    return confmat
-
-
-def compute_metrics(confmat):
-    """
-    Compute macro F1 and mean IoU over classes present in labels or predictions.
-    """
-    confmat = confmat.float()
-    true_positive = confmat.diag()
-    false_positive = confmat.sum(dim=0) - true_positive
-    false_negative = confmat.sum(dim=1) - true_positive
-
-    iou_denominator = true_positive + false_positive + false_negative
-    f1_denominator = (2 * true_positive) + false_positive + false_negative
-
-    iou = torch.zeros_like(true_positive)
-    f1 = torch.zeros_like(true_positive)
-
-    iou_valid = iou_denominator > 0
-    f1_valid = f1_denominator > 0
-
-    iou[iou_valid] = true_positive[iou_valid] / iou_denominator[iou_valid]
-    f1[f1_valid] = (2 * true_positive[f1_valid]) / f1_denominator[f1_valid]
-
-    present = iou_denominator > 0
-
-    return {
-        "f1": f1[present].mean().item() if present.any() else 0.0,
-        "miou": iou[present].mean().item() if present.any() else 0.0,
-        "per_class_f1": f1.detach().cpu().tolist(),
-        "per_class_iou": iou.detach().cpu().tolist(),
-    }
+from src.modules import SegmentationLoss
+from src.metrics import update_confusion_matrix, compute_training_metrics
 
 
 def freeze_backbone(model: nn.Module):
@@ -83,11 +24,12 @@ def freeze_backbone(model: nn.Module):
     """
     frozen_params = 0
 
+    # name for resnet encoder layer
     for name in ("layer0", "layer1", "layer2", "layer3", "layer4"):
         layer = getattr(model, name, None)
         if layer is None:
             continue
-
+        # freeze param by disabling grad
         for param in layer.parameters():
             param.requires_grad = False
             frozen_params += param.numel()
@@ -116,13 +58,23 @@ def unfreeze_all(model: nn.Module, new_lr: float, optimizer):
     print(f"[unfreeze] All layers unfrozen. New LR for new params: {new_lr}")
 
 
+def get_amp_dtype(device):
+    """
+    Choose an autocast dtype that works across CPU and different CUDA GPUs.
+    """
+    if device.type == "cuda" and not torch.cuda.is_bf16_supported():
+        return torch.float16
+
+    return torch.bfloat16
+
+
 class Trainer:
     """
     Trainer class.
 
     Expected dataset __getitem__: (image_tensor, mask_tensor)
         image: (C, H, W) float
-        mask:  (H, W) long integer class indices
+        mask: (H, W) long integer class indices
 
     Config keys:
         device, output_dir, epochs, lr, weight_decay, label_smoothing,
@@ -156,6 +108,7 @@ class Trainer:
     ):
         self.config = config
         self.device = config["device"]
+        self.amp_dtype = get_amp_dtype(self.device)
 
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -181,7 +134,8 @@ class Trainer:
             dice_weight=config["dice_weight"],
             label_smoothing=config["label_smoothing"],
             ignore_index=config["ignore_index"],
-        )
+            class_weights=get_class_weights(config, self.num_classes),
+        ).to(self.device)
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         if not trainable_params:
@@ -212,26 +166,7 @@ class Trainer:
         history_filename = f"{model_name}_history.pkl"
         self.history_path = model_dir / history_filename
 
-        self.history = {
-            "train_loss": {
-                "total_loss": [],
-                "ce_loss": [],
-                "dice_loss": [],
-            },
-            "val_loss": {
-                "total_loss": [],
-                "ce_loss": [],
-                "dice_loss": [],
-            },
-            "train_metrics": {
-                "f1": [],
-                "miou": [],
-            },
-            "val_metrics": {
-                "f1": [],
-                "miou": [],
-            },
-        }
+        self.history = []
 
     def fit(self):
         print("Starting training...\n")
@@ -280,7 +215,7 @@ class Trainer:
 
                 self.optimizer.zero_grad(set_to_none=True)
 
-                with autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                with autocast(device_type=self.device.type, dtype=self.amp_dtype):
                     logits = self.model(imgs)
                     loss, ce_loss, dice_loss = self.criterion(logits, masks)
 
@@ -325,7 +260,7 @@ class Trainer:
                     imgs = imgs.to(self.device)
                     masks = masks.to(self.device).long()
 
-                    with autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    with autocast(device_type=self.device.type, dtype=self.amp_dtype):
                         logits = self.model(imgs)
                         loss, ce_loss, dice_loss = self.criterion(logits, masks)
 
@@ -354,23 +289,38 @@ class Trainer:
             val_dice /= len(self.val_loader)
 
             # IoU is the primary metric
-            train_metrics = compute_metrics(train_confmat)
-            val_metrics = compute_metrics(val_confmat)
+            train_metrics = compute_training_metrics(train_confmat)
+            val_metrics = compute_training_metrics(val_confmat)
             train_f1 = train_metrics["f1"]
             val_f1 = val_metrics["f1"]
             train_miou = train_metrics["miou"]
             val_miou = val_metrics["miou"]
 
-            self.history["train_loss"]["total_loss"].append(train_loss)
-            self.history["train_loss"]["ce_loss"].append(train_ce)
-            self.history["train_loss"]["dice_loss"].append(train_dice)
-            self.history["val_loss"]["total_loss"].append(val_loss)
-            self.history["val_loss"]["ce_loss"].append(val_ce)
-            self.history["val_loss"]["dice_loss"].append(val_dice)
-            self.history["train_metrics"]["f1"].append(train_f1)
-            self.history["train_metrics"]["miou"].append(train_miou)
-            self.history["val_metrics"]["f1"].append(val_f1)
-            self.history["val_metrics"]["miou"].append(val_miou)
+            self.history.append(
+                {
+                    "epoch": epoch,
+                    "train_loss": {
+                        "total": train_loss,
+                        "ce": train_ce,
+                        "dice": train_dice,
+                    },
+                    "val_loss": {
+                        "total": val_loss,
+                        "ce": val_ce,
+                        "dice": val_dice,
+                    },
+                    "train_metrics": {
+                        "f1": train_f1,
+                        "miou": train_miou,
+                    },
+                    "val_metrics": {
+                        "f1": val_f1,
+                        "miou": val_miou,
+                        "building_iou": val_metrics["building_iou"],
+                        "damage_miou": val_metrics["damage_miou"],
+                    },
+                }
+            )
 
             # logging
             epoch_time = time.time() - epoch_start
@@ -380,7 +330,9 @@ class Trainer:
                 f"train_loss={train_loss:.6f} (ce={train_ce:.4f}, dice={train_dice:.4f}) | "
                 f"val_loss={val_loss:.6f} (ce={val_ce:.4f}, dice={val_dice:.4f}) | "
                 f"train_f1={train_f1:.4f} | val_f1={val_f1:.4f} | "
-                f"train_mIoU={train_miou:.4f} | val_mIoU={val_miou:.4f}"
+                f"train_mIoU={train_miou:.4f} | val_mIoU={val_miou:.4f} | "
+                f"val_building_IoU={val_metrics['building_iou']:.4f} | "
+                f"val_damage_mIoU={val_metrics['damage_miou']:.4f}"
             )
 
             # callbacks
@@ -399,6 +351,8 @@ class Trainer:
                 "val_f1": val_f1,
                 "train_miou": train_miou,
                 "val_miou": val_miou,
+                "val_building_iou": val_metrics["building_iou"],
+                "val_damage_miou": val_metrics["damage_miou"],
             }
 
             is_stopping = self.callbacks.step(

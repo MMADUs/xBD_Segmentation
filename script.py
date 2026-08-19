@@ -6,8 +6,7 @@ from torch.utils.data import DataLoader, Subset
 
 from src.utils import PROJECT_ROOT, DeviceDataLoader, set_random_seed
 from src.dataset import XBDDataset
-from src.unet import UNet
-from src.deeplab import DeepLabV3Plus
+from src.modules import UNet, DeepLabV3Plus
 from src.train import Trainer
 from config.training import get_config
 from config.transform import train_transform, val_transform
@@ -17,7 +16,13 @@ N_TEST_SAMPLES = 500
 
 class CustomSubset(Subset):
     def labels(self):
-        return [self.dataset.samples[i][1] for i in self.indices]
+        labels = []
+
+        for idx in self.indices:
+            sample_idx, _ = self.dataset._index[idx]
+            labels.append(self.dataset.samples[sample_idx]["label_path"])
+
+        return labels
 
 
 def main():
@@ -47,9 +52,17 @@ def main():
     val_path = PROJECT_ROOT / ".dataset" / "hold"
 
     train_ds = XBDDataset(
-        root=train_path, patch_division=True, transform=train_transform
+        root=train_path,
+        input_mode=config["input_mode"],
+        patch_division=True,
+        transform=train_transform,
     )
-    val_ds = XBDDataset(root=val_path, patch_division=True, transform=val_transform)
+    val_ds = XBDDataset(
+        root=val_path,
+        input_mode=config["input_mode"],
+        patch_division=True,
+        transform=val_transform,
+    )
 
     if args.test:
         train_ds = CustomSubset(train_ds, list(range(N_TEST_SAMPLES)))
@@ -81,14 +94,20 @@ def main():
     selected_models = args.model
 
     if "unet" in selected_models:
-        unet = UNet(num_classes=XBDDataset.NUM_CLASSES).to(device)
+        unet = UNet(
+            num_classes=XBDDataset.NUM_CLASSES,
+            in_channels=config["in_channels"],
+        ).to(device)
         unet_trainer = Trainer(
             unet, "UNet", train_dl, val_dl, XBDDataset.NUM_CLASSES, config
         )
         unet_trainer.fit()
 
     if "deeplab" in selected_models:
-        deeplab = DeepLabV3Plus(num_classes=XBDDataset.NUM_CLASSES).to(device)
+        deeplab = DeepLabV3Plus(
+            num_classes=XBDDataset.NUM_CLASSES,
+            in_channels=config["in_channels"],
+        ).to(device)
         deeplab_trainer = Trainer(
             deeplab, "DeepLabV3+", train_dl, val_dl, XBDDataset.NUM_CLASSES, config
         )
