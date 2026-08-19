@@ -1,5 +1,6 @@
 # Copyright 2025-2026 Muhammad Nizwa. All rights reserved.
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -85,20 +86,31 @@ class SegmentationLoss(nn.Module):
         dice_weight: float = 1.0,
         label_smoothing: float = 0.0,
         ignore_index: int = -1,
+        class_weights: list[float] | None = None,
     ):
         super().__init__()
 
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
+        self.label_smoothing = label_smoothing
+        self.ignore_index = ignore_index
 
-        self.ce = nn.CrossEntropyLoss(
-            label_smoothing=label_smoothing,
-            ignore_index=ignore_index,
-        )
+        if class_weights is not None:
+            weights = torch.as_tensor(class_weights, dtype=torch.float32)
+            self.register_buffer("class_weights", weights)
+        else:
+            self.class_weights = None
+
         self.dice = DiceLoss(num_classes=num_classes, ignore_index=ignore_index)
 
     def forward(self, logits, targets):
-        ce_loss = self.ce(logits, targets)
+        ce_loss = F.cross_entropy(
+            logits,
+            targets,
+            weight=self.class_weights,
+            label_smoothing=self.label_smoothing,
+            ignore_index=self.ignore_index,
+        )
         dice_loss = self.dice(logits, targets)
 
         total_loss = self.ce_weight * ce_loss + self.dice_weight * dice_loss

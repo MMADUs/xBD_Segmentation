@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
+from src.modules.adapter import adapt_first_conv
+
 
 class DecoderBlock(nn.Module):
     def __init__(
@@ -46,10 +48,11 @@ class DecoderBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, in_channels=3):
         super().__init__()
 
         resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+        resnet.conv1 = adapt_first_conv(resnet.conv1, in_channels)
 
         self.layer0 = nn.Sequential(
             resnet.conv1,
@@ -109,7 +112,7 @@ class UNet(nn.Module):
 
 
 if __name__ == "__main__":
-    model = UNet(num_classes=4)
-    x = torch.randn(2, 3, 512, 512)
+    model = UNet(num_classes=5, in_channels=6)
+    x = torch.randn(2, 6, 512, 512)
     y = model(x)
-    print("Output shape:", y.shape)  # expect (2, 4, 512, 512)
+    print("Output shape:", y.shape)  # expect (2, 5, 512, 512)

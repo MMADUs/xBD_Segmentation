@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50, ResNet50_Weights
 
+from src.modules.adapter import adapt_first_conv
+
 
 class ASPP(nn.Module):
     def __init__(
@@ -130,10 +132,11 @@ class DeepLabDecoder(nn.Module):
 
 
 class DeepLabV3Plus(nn.Module):
-    def __init__(self, num_classes=4):
+    def __init__(self, num_classes=5, in_channels=3):
         super().__init__()
 
         resnet = resnet50(weights=ResNet50_Weights.DEFAULT)
+        resnet.conv1 = adapt_first_conv(resnet.conv1, in_channels)
 
         self.layer0 = nn.Sequential(
             resnet.conv1,
@@ -177,7 +180,7 @@ class DeepLabV3Plus(nn.Module):
 
 
 if __name__ == "__main__":
-    model = DeepLabV3Plus(num_classes=4)
-    x = torch.randn(2, 3, 512, 512)
+    model = DeepLabV3Plus(num_classes=5, in_channels=6)
+    x = torch.randn(2, 6, 512, 512)
     y = model(x)
     print("Output:", y.shape)
