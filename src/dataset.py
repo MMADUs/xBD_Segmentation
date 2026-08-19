@@ -5,6 +5,7 @@ import os
 
 import cv2
 import numpy as np
+import torch
 from shapely import wkt
 from torch.utils.data import Dataset
 
@@ -34,35 +35,64 @@ class XBDDataset(Dataset):
     IMAGE_SIZE = 1024
     NUM_PATCHES = len(PATCH_COORDS)  # 4
 
-    def __init__(self, root: str, patch_division=False, transform=None):
+    def __init__(
+        self,
+        root: str,
+        input_mode: str = "post",
+        patch_division=False,
+        transform=None,
+    ):
         self.root = root
         self.transform = transform
         self.patch_division = patch_division
+        self.input_mode = input_mode
+
+        if self.input_mode not in {"post", "pre_post"}:
+            raise ValueError(
+                f"input_mode must be 'post' or 'pre_post', got {input_mode!r}"
+            )
 
         img_dir = os.path.join(root, "images")
         label_dir = os.path.join(root, "labels")
 
         valid_ext = (".png", ".jpg", ".jpeg")
 
-        # (image_path, label_path) pairs
-        self.samples: list[tuple[str, str]] = []
+        self.samples: list[dict[str, str | None]] = []
 
         for filename in sorted(os.listdir(img_dir)):
             # skip if not supported image format
             if not filename.lower().endswith(valid_ext):
                 continue
 
+            # skip if post disaster does not exist (no disaster result)
+            if "_post_disaster" not in filename:
+                continue
+
             stem = os.path.splitext(filename)[0]
-            img_path = os.path.join(img_dir, filename)
+            post_path = os.path.join(img_dir, filename)
+            pre_path = None
             label_path = os.path.join(label_dir, stem + ".json")
 
             # skip images without labels
             if not os.path.isfile(label_path):
                 continue
 
-            self.samples.append((img_path, label_path))
+            if self.input_mode == "pre_post":
+                pre_filename = filename.replace("_post_disaster", "_pre_disaster")
+                pre_path = os.path.join(img_dir, pre_filename)
 
-        # self._index maps flat idx → (sample_idx, patch_idx)
+                if not os.path.isfile(pre_path):
+                    continue
+
+            self.samples.append(
+                {
+                    "post_path": post_path,
+                    "pre_path": pre_path,
+                    "label_path": label_path,
+                }
+            )
+
+        # self._index maps flat idx -> (sample_idx, patch_idx)
         if self.patch_division:
             # each sample expands into NUM_PATCHES entries
             self._index: list[tuple[int, int]] = [
@@ -81,22 +111,47 @@ class XBDDataset(Dataset):
 
     def __getitem__(self, idx: int):
         sample_idx, patch_idx = self._index[idx]
-        img_path, label_path = self.samples[sample_idx]
+        sample = self.samples[sample_idx]
 
-        image = self._load_image(img_path)
-        mask = self._load_mask(label_path)
+        post_image = self._load_image(sample["post_path"])
+        pre_image = (
+            self._load_image(sample["pre_path"])
+            if self.input_mode == "pre_post"
+            else None
+        )
+        mask = self._load_mask(sample["label_path"])
 
         if self.patch_division:
             row_0, row_1, col_0, col_1 = PATCH_COORDS[patch_idx]
 
-            image = image[row_0:row_1, col_0:col_1]
+            post_image = post_image[row_0:row_1, col_0:col_1]
+
+            if pre_image is not None:
+                pre_image = pre_image[row_0:row_1, col_0:col_1]
+                
             mask = mask[row_0:row_1, col_0:col_1]
 
         if self.transform:
-            augmented = self.transform(image=image, mask=mask)
+            if pre_image is not None:
+                augmented = self.transform(
+                    image=post_image,
+                    pre_image=pre_image,
+                    mask=mask,
+                )
 
-            image = augmented["image"]
+                image = torch.cat(
+                    [augmented["pre_image"], augmented["image"]],
+                    dim=0,
+                )
+            else:
+                augmented = self.transform(image=post_image, mask=mask)
+                image = augmented["image"]
+
             mask = augmented["mask"]
+        elif pre_image is not None:
+            image = np.concatenate([pre_image, post_image], axis=2)
+        else:
+            image = post_image
 
         return image, mask
 
@@ -145,7 +200,7 @@ class XBDDataset(Dataset):
         Maps class id -> damage label
         """
         return {
-            0: "background", 
+            0: "background",
             **{v: k for k, v in DAMAGE_MAP.items()},
         }
 
