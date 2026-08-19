@@ -15,7 +15,7 @@ DAMAGE_MAP = {
     "destroyed": 4,
 }
 
-# Patch grid: (row_start, row_end, col_start, col_end)
+# patch grid: (row_start, row_end, col_start, col_end)
 PATCH_COORDS = [
     (0, 512, 0, 512),  # top-left
     (0, 512, 512, 1024),  # top-right
@@ -26,7 +26,7 @@ PATCH_COORDS = [
 
 class XBDDataset(Dataset):
     """
-    xBD Building Damage Segmentation Dataset.
+    Torch dataset for xBD dataset in patches.
     """
 
     NUM_CLASSES = 5  # 0 = background, 1-4 = damage levels
@@ -44,7 +44,7 @@ class XBDDataset(Dataset):
 
         valid_ext = (".png", ".jpg", ".jpeg")
 
-        # Collect (image_path, label_path) pairs
+        # (image_path, label_path) pairs
         self.samples: list[tuple[str, str]] = []
 
         for filename in sorted(os.listdir(img_dir)):
@@ -56,21 +56,22 @@ class XBDDataset(Dataset):
             img_path = os.path.join(img_dir, filename)
             label_path = os.path.join(label_dir, stem + ".json")
 
+            # skip images without labels
             if not os.path.isfile(label_path):
-                continue  # skip images without labels
+                continue
 
             self.samples.append((img_path, label_path))
 
         # self._index maps flat idx → (sample_idx, patch_idx)
         if self.patch_division:
-            # Each sample expands into NUM_PATCHES entries
+            # each sample expands into NUM_PATCHES entries
             self._index: list[tuple[int, int]] = [
                 (s, p)
                 for s in range(len(self.samples))
                 for p in range(self.NUM_PATCHES)
             ]
         else:
-            # Each sample is a single entry, patch_idx unused
+            # each sample is a single entry, patch_idx unused
             self._index: list[tuple[int, int]] = [
                 (s, 0) for s in range(len(self.samples))
             ]
@@ -86,24 +87,30 @@ class XBDDataset(Dataset):
         mask = self._load_mask(label_path)
 
         if self.patch_division:
-            r0, r1, c0, c1 = PATCH_COORDS[patch_idx]
-            image = image[r0:r1, c0:c1]
-            mask = mask[r0:r1, c0:c1]
+            row_0, row_1, col_0, col_1 = PATCH_COORDS[patch_idx]
+
+            image = image[row_0:row_1, col_0:col_1]
+            mask = mask[row_0:row_1, col_0:col_1]
 
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
+
             image = augmented["image"]
             mask = augmented["mask"]
 
         return image, mask
 
     def _load_image(self, path: str) -> np.ndarray:
-        """Load image as RGB uint8 (H, W, 3)."""
+        """
+        Load image as RGB uint8 (H, W, 3)
+        """
         img = cv2.imread(path, cv2.IMREAD_COLOR)
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     def _load_mask(self, path: str) -> np.ndarray:
-        """Build a multi-class segmentation mask from an xBD label JSON."""
+        """
+        Build a multi-class segmentation mask from an xBD label JSON
+        """
         with open(path, "r") as f:
             data = json.load(f)
 
@@ -113,8 +120,9 @@ class XBDDataset(Dataset):
             subtype = feat["properties"].get("subtype", "")
             class_id = DAMAGE_MAP.get(subtype)
 
+            # skip unknown subtypes
             if class_id is None:
-                continue  # skip unknown subtypes
+                continue
 
             polygon = wkt.loads(feat["wkt"])
 
@@ -127,13 +135,20 @@ class XBDDataset(Dataset):
         return mask
 
     def get_num_images(self) -> int:
-        """Number of raw images (before patching)."""
+        """
+        Number of raw images (before patching)
+        """
         return len(self.samples)
 
     def get_class_names(self) -> dict[int, str]:
-        """Maps class id → damage label."""
-        return {0: "background", **{v: k for k, v in DAMAGE_MAP.items()}}
+        """
+        Maps class id -> damage label
+        """
+        return {
+            0: "background", 
+            **{v: k for k, v in DAMAGE_MAP.items()},
+        }
 
-    def get_patch_coords(self) -> list[tuple[int, int, int, int]]:
-        """Returns the (r0, r1, c0, c1) crop coordinates for each patch slot."""
-        return PATCH_COORDS
+    # def get_patch_coords(self) -> list[tuple[int, int, int, int]]:
+    #     """Returns the (r0, r1, c0, c1) crop coordinates for each patch slot."""
+    #     return PATCH_COORDS

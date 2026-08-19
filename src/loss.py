@@ -9,13 +9,22 @@ class DiceLoss(nn.Module):
     Multiclass Dice Loss averaged over classes (macro).
 
     Args:
-        num_classes: number of classes in the segmentation task
-        smooth: smoothing factor to avoid division by zero (default: 1.0)
-        ignore_index: class index to ignore in the loss computation (default: -1)
+        num_classes: 
+            number of classes in the segmentation task
+        smooth: 
+            smoothing factor to avoid division by zero
+        ignore_index: 
+            class index to ignore in the loss computation
     """
 
-    def __init__(self, num_classes: int, smooth: float = 1.0, ignore_index: int = -1):
+    def __init__(
+        self,
+        num_classes: int,
+        smooth: float = 1.0,
+        ignore_index: int = -1,
+    ):
         super().__init__()
+
         self.num_classes = num_classes
         self.smooth = smooth
         self.ignore_index = ignore_index
@@ -23,8 +32,10 @@ class DiceLoss(nn.Module):
     def forward(self, logits, targets):
         """
         Args:
-            logits:  (B, C, H, W) raw model outputs
-            targets: (B, H, W) integer class labels
+            logits:
+                (B, C, H, W) raw model outputs
+            targets:
+                (B, H, W) integer class labels
         """
         probs = F.softmax(logits, dim=1)  # (B, C, H, W)
 
@@ -52,14 +63,19 @@ class DiceLoss(nn.Module):
 
 class SegmentationLoss(nn.Module):
     """
-    Combined CE + Dice loss for multiclass segmentation.
+    The multiclass semantic segmentation loss consist of a combined Cross Entropy + Macro Dice loss
 
     Args:
-        num_classes: number of classes in the segmentation task
-        ce_weight: weight for the cross-entropy loss (default: 1.0)
-        dice_weight: weight for the Dice loss (default: 1.0)
-        label_smoothing: label smoothing factor (default: 0.0)
-        ignore_index: class index to ignore in the loss computation (default: -1)
+        num_classes: 
+            number of classes in the segmentation task
+        ce_weight: 
+            weight for the cross-entropy loss
+        dice_weight: 
+            weight for the Dice loss
+        label_smoothing: 
+            label smoothing factor
+        ignore_index: 
+            class index to ignore in the loss computation
     """
 
     def __init__(
@@ -71,6 +87,7 @@ class SegmentationLoss(nn.Module):
         ignore_index: int = -1,
     ):
         super().__init__()
+
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
 

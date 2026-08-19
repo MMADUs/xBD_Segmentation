@@ -6,8 +6,8 @@ from torch.utils.data import DataLoader, Subset
 
 from src.utils import PROJECT_ROOT, DeviceDataLoader, set_random_seed
 from src.dataset import XBDDataset
-from src.modules.unet import UNet
-from src.modules.deeplab import DeepLabV3Plus
+from src.unet import UNet
+from src.deeplab import DeepLabV3Plus
 from src.train import Trainer
 from config.training import get_config
 from config.transform import train_transform, val_transform
@@ -46,7 +46,9 @@ def main():
     train_path = PROJECT_ROOT / ".dataset" / "train"
     val_path = PROJECT_ROOT / ".dataset" / "hold"
 
-    train_ds = XBDDataset(root=train_path, patch_division=True, transform=train_transform)
+    train_ds = XBDDataset(
+        root=train_path, patch_division=True, transform=train_transform
+    )
     val_ds = XBDDataset(root=val_path, patch_division=True, transform=val_transform)
 
     if args.test:

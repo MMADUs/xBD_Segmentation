@@ -11,76 +11,138 @@ from tqdm import tqdm
 from torch.optim import AdamW
 from torch.amp import autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from sklearn.metrics import f1_score
 
 from src.utils import time_formatter
 from src.callbacks import TrainingCallback, TrainCheckpoint, EarlyStopping
-from src.modules.loss import SegmentationLoss
+from src.loss import SegmentationLoss
 
 
-def f1(labels, preds):
-    f1 = f1_score(labels, preds, average="macro", zero_division=0)
-    return round(f1, 4)
-
-
-def mean_iou(preds_flat, labels_flat, num_classes):
+def update_confusion_matrix(confmat, preds, labels, num_classes, ignore_index=-1):
     """
-    Compute mean IoU (intersection over union)
-    over all classes (ignoring classes absent in both).
+    Update a confusion matrix from segmentation predictions without storing pixels.
     """
-    preds_t = torch.tensor(preds_flat)
-    labels_t = torch.tensor(labels_flat)
+    preds = preds.reshape(-1)
+    labels = labels.reshape(-1)
 
-    iou_list = []
+    if ignore_index >= 0:
+        keep = labels != ignore_index
+        preds = preds[keep]
+        labels = labels[keep]
 
-    for c in range(num_classes):
-        # mask for class c in preds and labels
-        pred_c = preds_t == c
-        true_c = labels_t == c
+    valid = (
+        (labels >= 0)
+        & (labels < num_classes)
+        & (preds >= 0)
+        & (preds < num_classes)
+    )
 
-        # compute intersection and union
-        inter = (pred_c & true_c).sum().item()
-        union = (pred_c | true_c).sum().item()
+    if valid.any():
+        indices = num_classes * labels[valid] + preds[valid]
+        confmat += torch.bincount(
+            indices,
+            minlength=num_classes**2,
+        ).reshape(num_classes, num_classes)
 
-        # skip if union is zero (class not present in preds and labels)
-        if union == 0:
+    return confmat
+
+
+def compute_metrics(confmat):
+    """
+    Compute macro F1 and mean IoU over classes present in labels or predictions.
+    """
+    confmat = confmat.float()
+    true_positive = confmat.diag()
+    false_positive = confmat.sum(dim=0) - true_positive
+    false_negative = confmat.sum(dim=1) - true_positive
+
+    iou_denominator = true_positive + false_positive + false_negative
+    f1_denominator = (2 * true_positive) + false_positive + false_negative
+
+    iou = torch.zeros_like(true_positive)
+    f1 = torch.zeros_like(true_positive)
+
+    iou_valid = iou_denominator > 0
+    f1_valid = f1_denominator > 0
+
+    iou[iou_valid] = true_positive[iou_valid] / iou_denominator[iou_valid]
+    f1[f1_valid] = (2 * true_positive[f1_valid]) / f1_denominator[f1_valid]
+
+    present = iou_denominator > 0
+
+    return {
+        "f1": f1[present].mean().item() if present.any() else 0.0,
+        "miou": iou[present].mean().item() if present.any() else 0.0,
+        "per_class_f1": f1.detach().cpu().tolist(),
+        "per_class_iou": iou.detach().cpu().tolist(),
+    }
+
+
+def freeze_backbone(model: nn.Module):
+    """
+    Freeze common ResNet-style encoder layers for warmup training.
+    """
+    frozen_params = 0
+
+    for name in ("layer0", "layer1", "layer2", "layer3", "layer4"):
+        layer = getattr(model, name, None)
+        if layer is None:
             continue
 
-        # compute IoU for class c and append to list
-        iou_list.append(inter / union)
+        for param in layer.parameters():
+            param.requires_grad = False
+            frozen_params += param.numel()
 
-    # return mean IoU over classes, or 0.0 if no classes present
-    return round(sum(iou_list) / len(iou_list), 4) if iou_list else 0.0
+    print(f"[freeze] Backbone frozen ({frozen_params:,} parameters).")
 
 
 def unfreeze_all(model: nn.Module, new_lr: float, optimizer):
-    """Unfreeze every parameter and add them to the optimizer."""
+    """
+    Unfreeze every parameter and add them to the optimizer.
+    """
     # check existing optimizer params to avoid duplicates
     existing_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
+
     # gather new params that are not already in the optimizer
-    new_params = [p for p in model.parameters() if id(p) not in existing_ids]
+    new_params = []
+    for param in model.parameters():
+        param.requires_grad = True
+        if id(param) not in existing_ids:
+            new_params.append(param)
+
     # add new param group with the specified learning rate
-    optimizer.add_param_group({"params": new_params, "lr": new_lr})
-    print(f"[unfreeze] All layers unfrozen. New LR for backbone: {new_lr}")
+    if new_params:
+        optimizer.add_param_group({"params": new_params, "lr": new_lr})
+
+    print(f"[unfreeze] All layers unfrozen. New LR for new params: {new_lr}")
 
 
 class Trainer:
     """
-    Trainer for semantic segmentation models (UNet, DeepLabV3, etc.).
+    Trainer class.
 
     Expected dataset __getitem__: (image_tensor, mask_tensor)
-        image: (C, H, W)  float
-        mask:  (H, W)     long  — integer class indices
+        image: (C, H, W) float
+        mask:  (H, W) long integer class indices
 
-    Config keys (same conventions as the classification Trainer):
+    Config keys:
         device, output_dir, epochs, lr, weight_decay, label_smoothing,
         grad_clip, two_phase, warmup_epochs, unfreeze_lr,
-        append_train_history_step, append_val_history_step,
         early_stopping_patience, ckpt_basename, ckpt_format,
-        num_classes,
-        ce_weight        (default 1.0),
-        dice_weight      (default 1.0),
-        ignore_index     (default -1, set to e.g. 255 for VOC-style void),
+        ce_weight, dice_weight, ignore_index
+
+    Args:
+        model:
+            torch module model
+        model_name:
+            model alias name
+        train_loader:
+            training set torch dataloader
+        val_loader:
+            validation set torch dataloader
+        num_classes:
+            number of label class
+        config:
+            configuration dict
     """
 
     def __init__(
@@ -104,6 +166,9 @@ class Trainer:
 
         self.model = model.to(self.device)
 
+        if config["two_phase"]:
+            freeze_backbone(self.model)
+
         output_dir = Path(config["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -112,14 +177,18 @@ class Trainer:
 
         self.criterion = SegmentationLoss(
             num_classes=self.num_classes,
-            ce_weight=config.get("ce_weight", 1.0),
-            dice_weight=config.get("dice_weight", 1.0),
-            label_smoothing=config.get("label_smoothing", 0.0),
-            ignore_index=config.get("ignore_index", -1),
+            ce_weight=config["ce_weight"],
+            dice_weight=config["dice_weight"],
+            label_smoothing=config["label_smoothing"],
+            ignore_index=config["ignore_index"],
         )
 
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        if not trainable_params:
+            raise ValueError("No trainable parameters found for optimizer setup.")
+
         self.optimizer = AdamW(
-            self.model.parameters(),
+            trainable_params,
             lr=config["lr"],
             weight_decay=config["weight_decay"],
         )
@@ -144,38 +213,31 @@ class Trainer:
         self.history_path = model_dir / history_filename
 
         self.history = {
-            "train_loss": [],
-            "train_ce_loss": [],
-            "train_dice_loss": [],
-            "val_loss": [],
-            "val_ce_loss": [],
-            "val_dice_loss": [],
-            "train_metrics": [],
-            "val_metrics": [],
+            "train_loss": {
+                "total_loss": [],
+                "ce_loss": [],
+                "dice_loss": [],
+            },
+            "val_loss": {
+                "total_loss": [],
+                "ce_loss": [],
+                "dice_loss": [],
+            },
+            "train_metrics": {
+                "f1": [],
+                "miou": [],
+            },
+            "val_metrics": {
+                "f1": [],
+                "miou": [],
+            },
         }
-
-    @staticmethod
-    def _flatten(preds, labels, ignore_index=-1):
-        """Flatten spatial dims and optionally drop ignore_index pixels."""
-        p = preds.view(-1).cpu().tolist()
-        l = labels.view(-1).cpu().tolist()
-
-        if ignore_index >= 0:
-            pairs = [(pp, ll) for pp, ll in zip(p, l) if ll != ignore_index]
-            
-            if pairs:
-                p, l = zip(*pairs)
-                return list(p), list(l)
-            
-            return [], []
-
-        return p, l
 
     def fit(self):
         print("Starting training...\n")
 
         start_time = time.time()
-        ignore_index = self.config.get("ignore_index", -1)
+        ignore_index = self.config["ignore_index"]
 
         for epoch in range(1, self.config["epochs"] + 1):
             epoch_start = time.time()
@@ -190,6 +252,7 @@ class Trainer:
 
                 # update scheduler with new T_max for remaining epochs
                 remaining = self.config["epochs"] - epoch + 1
+
                 self.scheduler = CosineAnnealingLR(
                     self.optimizer,
                     T_max=remaining,
@@ -199,11 +262,13 @@ class Trainer:
             # train
             self.model.train()
 
-            global_train_loss = global_train_ce = global_train_dice = 0.0
-            window_train_loss = window_train_ce = window_train_dice = 0.0
-
-            window_train_preds, window_train_labels = [], []
-            epoch_train_preds, epoch_train_labels = [], []
+            train_loss = train_ce = train_dice = 0.0
+            train_confmat = torch.zeros(
+                self.num_classes,
+                self.num_classes,
+                device=self.device,
+                dtype=torch.long,
+            )
 
             train_step = 0
 
@@ -226,61 +291,34 @@ class Trainer:
                 self.optimizer.step()
 
                 preds = logits.argmax(dim=1)
-
-                p_flat, l_flat = self._flatten(preds, masks, ignore_index)
-
-                # append preds and labels
-                window_train_preds.extend(p_flat)
-                window_train_labels.extend(l_flat)
-                epoch_train_preds.extend(p_flat)
-                epoch_train_labels.extend(l_flat)
-
-                # windowed loss
-                window_train_loss += loss.item()
-                window_train_ce += ce_loss.item()
-                window_train_dice += dice_loss.item()
+                train_confmat = update_confusion_matrix(
+                    train_confmat,
+                    preds,
+                    masks,
+                    self.num_classes,
+                    ignore_index,
+                )
 
                 # global loss
-                global_train_loss += loss.item()
-                global_train_ce += ce_loss.item()
-                global_train_dice += dice_loss.item()
+                train_loss += loss.item()
+                train_ce += ce_loss.item()
+                train_dice += dice_loss.item()
 
                 train_step += 1
                 batch_iter.set_postfix({"loss": f"{loss.item():6.3f}"})
-
-                if train_step % self.config["append_train_history_step"] == 0:
-                    # avg loss
-                    avg = window_train_loss / train_step
-
-                    # append to history
-                    self.history["train_loss"].append(round(avg, 6))
-                    self.history["train_ce_loss"].append(
-                        round(window_train_ce / train_step, 6)
-                    )
-                    self.history["train_dice_loss"].append(
-                        round(window_train_dice / train_step, 6)
-                    )
-                    self.history["train_f1"].append(
-                        f1(window_train_labels, window_train_preds)
-                    )
-
-                    # reset
-                    window_train_loss = window_train_ce = window_train_dice = 0.0
-                    window_train_preds, window_train_labels = [], []
-                    train_step = 0
 
             self.scheduler.step()
 
             # eval
             self.model.eval()
 
-            global_val_loss = global_val_ce = global_val_dice = 0.0
-            window_val_loss = window_val_ce = window_val_dice = 0.0
-
-            window_val_preds, window_val_labels = [], []
-            epoch_val_preds, epoch_val_labels = [], []
-
-            val_step = 0
+            val_loss = val_ce = val_dice = 0.0
+            val_confmat = torch.zeros(
+                self.num_classes,
+                self.num_classes,
+                device=self.device,
+                dtype=torch.long,
+            )
 
             with torch.no_grad():
                 for imgs, masks in tqdm(self.val_loader, desc="validation"):
@@ -292,75 +330,55 @@ class Trainer:
                         loss, ce_loss, dice_loss = self.criterion(logits, masks)
 
                     preds = logits.argmax(dim=1)
-
-                    p_flat, l_flat = self._flatten(preds, masks, ignore_index)
-
-                    # append preds and labels
-                    window_val_preds.extend(p_flat)
-                    window_val_labels.extend(l_flat)
-                    epoch_val_preds.extend(p_flat)
-                    epoch_val_labels.extend(l_flat)
+                    val_confmat = update_confusion_matrix(
+                        val_confmat,
+                        preds,
+                        masks,
+                        self.num_classes,
+                        ignore_index,
+                    )
 
                     # windowed loss
-                    window_val_loss += loss.item()
-                    window_val_ce += ce_loss.item()
-                    window_val_dice += dice_loss.item()
+                    val_loss += loss.item()
+                    val_ce += ce_loss.item()
+                    val_dice += dice_loss.item()
 
-                    # global loss
-                    global_val_loss += loss.item()
-                    global_val_ce += ce_loss.item()
-                    global_val_dice += dice_loss.item()
+            # avg train loss
+            train_loss /= len(self.train_loader)
+            train_ce /= len(self.train_loader)
+            train_dice /= len(self.train_loader)
 
-                    val_step += 1
+            # avg val loss
+            val_loss /= len(self.val_loader)
+            val_ce /= len(self.val_loader)
+            val_dice /= len(self.val_loader)
 
-                    if val_step % self.config["append_val_history_step"] == 0:
-                        # avg loss
-                        avg = window_val_loss / val_step
+            # IoU is the primary metric
+            train_metrics = compute_metrics(train_confmat)
+            val_metrics = compute_metrics(val_confmat)
+            train_f1 = train_metrics["f1"]
+            val_f1 = val_metrics["f1"]
+            train_miou = train_metrics["miou"]
+            val_miou = val_metrics["miou"]
 
-                        # append to history
-                        self.history["val_loss"].append(round(avg, 6))
-                        self.history["val_ce_loss"].append(
-                            round(window_val_ce / val_step, 6)
-                        )
-                        self.history["val_dice_loss"].append(
-                            round(window_val_dice / val_step, 6)
-                        )
-                        self.history["val_f1"].append(
-                            f1(window_val_labels, window_val_preds)
-                        )
-
-                        # reset
-                        window_val_loss = window_val_ce = window_val_dice = 0.0
-                        window_val_preds, window_val_labels = [], []
-                        val_step = 0
-
-            # global train loss
-            global_train_loss /= len(self.train_loader)
-            global_train_ce /= len(self.train_loader)
-            global_train_dice /= len(self.train_loader)
-
-            # global val loss
-            global_val_loss /= len(self.val_loader)
-            global_val_ce /= len(self.val_loader)
-            global_val_dice /= len(self.val_loader)
-
-            # compute epoch-level f1
-            train_f1 = f1(epoch_train_labels, epoch_train_preds)
-            val_f1 = f1(epoch_val_labels, epoch_val_preds)
-
-            # IoU is the primary metrics
-            train_miou = mean_iou(
-                epoch_train_preds, epoch_train_labels, self.num_classes
-            )
-            val_miou = mean_iou(epoch_val_preds, epoch_val_labels, self.num_classes)
+            self.history["train_loss"]["total_loss"].append(train_loss)
+            self.history["train_loss"]["ce_loss"].append(train_ce)
+            self.history["train_loss"]["dice_loss"].append(train_dice)
+            self.history["val_loss"]["total_loss"].append(val_loss)
+            self.history["val_loss"]["ce_loss"].append(val_ce)
+            self.history["val_loss"]["dice_loss"].append(val_dice)
+            self.history["train_metrics"]["f1"].append(train_f1)
+            self.history["train_metrics"]["miou"].append(train_miou)
+            self.history["val_metrics"]["f1"].append(val_f1)
+            self.history["val_metrics"]["miou"].append(val_miou)
 
             # logging
             epoch_time = time.time() - epoch_start
 
             print(
                 f"Epoch {epoch}/{self.config['epochs']} - {time_formatter(epoch_time)} | "
-                f"train_loss={global_train_loss:.6f} (ce={global_train_ce:.4f}, dice={global_train_dice:.4f}) | "
-                f"val_loss={global_val_loss:.6f} (ce={global_val_ce:.4f}, dice={global_val_dice:.4f}) | "
+                f"train_loss={train_loss:.6f} (ce={train_ce:.4f}, dice={train_dice:.4f}) | "
+                f"val_loss={val_loss:.6f} (ce={val_ce:.4f}, dice={val_dice:.4f}) | "
                 f"train_f1={train_f1:.4f} | val_f1={val_f1:.4f} | "
                 f"train_mIoU={train_miou:.4f} | val_mIoU={val_miou:.4f}"
             )
@@ -375,8 +393,8 @@ class Trainer:
 
             metadata = {
                 "epoch": epoch,
-                "train_loss": global_train_loss,
-                "val_loss": global_val_loss,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
                 "train_f1": train_f1,
                 "val_f1": val_f1,
                 "train_miou": train_miou,

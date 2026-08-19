@@ -7,16 +7,12 @@ from torchvision.models import resnet50, ResNet50_Weights
 
 
 class ASPP(nn.Module):
-    """
-    ASPP module with parallel dilated convolutions and image pooling.
-
-    Args:
-        in_channels: number of input channels
-        out_channels: number of output channels for each parallel block
-        rates: list of dilation rates for the parallel dilated convolution blocks
-    """
-
-    def __init__(self, in_channels, out_channels=256, rates=[1, 6, 12, 18]):
+    def __init__(
+        self,
+        in_channels,
+        out_channels=256,
+        rates=[1, 6, 12, 18],
+    ):
         super().__init__()
 
         self.blocks = nn.ModuleList()
@@ -57,7 +53,7 @@ class ASPP(nn.Module):
 
         in_project = out_channels * (
             len(rates) + 2
-        )  # 1x1 conv + total rate + image pool = total rate + 2
+        )  # 1x1 conv + total rate + image pool = total rate + 2 (1x1 conv + image pool)
 
         self.project = nn.Sequential(
             nn.Conv2d(in_project, out_channels, kernel_size=1, bias=False),
@@ -90,16 +86,12 @@ class ASPP(nn.Module):
 
 
 class DeepLabDecoder(nn.Module):
-    """
-    DeepLabV3+ decoder module that fuses low-level features from early layers with high-level features from ASPP.
-
-    Args:
-        low_channels: number of channels in the low-level features
-        out_channels: number of channels to project low-level features to before fusion
-        final_channels: number of channels in the fused features before final classification
-    """
-
-    def __init__(self, low_channels, out_channels=48, final_channels=256):
+    def __init__(
+        self,
+        low_channels,
+        out_channels=48,
+        final_channels=256,
+    ):
         super().__init__()
 
         self.low_proj = nn.Sequential(
@@ -115,6 +107,7 @@ class DeepLabDecoder(nn.Module):
             nn.Conv2d(low_high, final_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(final_channels),
             nn.ReLU(inplace=True),
+            # idk why we have 2 conv here, maybe 1 works ?
             nn.Conv2d(
                 final_channels, final_channels, kernel_size=3, padding=1, bias=False
             ),
@@ -137,13 +130,6 @@ class DeepLabDecoder(nn.Module):
 
 
 class DeepLabV3Plus(nn.Module):
-    """
-    DeepLabV3+ Model.
-
-    Args:
-        num_classes: number of output classes for segmentation
-    """
-
     def __init__(self, num_classes=4):
         super().__init__()
 

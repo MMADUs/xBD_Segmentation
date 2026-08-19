@@ -1,14 +1,10 @@
 # Copyright 2025-2026 Muhammad Nizwa. All rights reserved.
 
-from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Literal
 import torch
 
 
 def is_improvement(value: float, best: float, mode: str, epsilon: float) -> bool:
-    """
-    Check if a metric value represents an improvement over the best value.
-    """
     if mode == "min":
         return (best - value) > epsilon
     else:
@@ -20,12 +16,20 @@ class TrainCheckpoint:
     TrainCheckpoint saves the model checkpoint when there is an improvement in the monitored metric.
 
     Args:
-        filepath: path to save the checkpoint
-        mode: "min" or "max", whether the monitored metric should be minimized or maximized
-        epsilon: minimum improvement to consider as an actual improvement (default: 0.0)
+        filepath:
+            path to save the checkpoint
+        mode:
+            whether the monitored metric should be minimized or maximized
+        epsilon:
+            minimum improvement to consider as an actual improvement
     """
 
-    def __init__(self, filepath, mode: str = "min", epsilon: float = 0.0) -> None:
+    def __init__(
+        self,
+        filepath,
+        mode: Literal["min", "max"] = "min",
+        epsilon: float = 0.0,
+    ) -> None:
         assert mode in {"min", "max"}
 
         self.filepath = filepath
@@ -47,12 +51,20 @@ class EarlyStopping:
     EarlyStopping stops training when a monitored metric has not improved for a given number of epochs.
 
     Args:
-        patience: number of epochs to wait for an improvement before stopping
-        epsilon: minimum improvement to consider as an actual improvement (default: 0.0
-        mode: "min" or "max", whether the monitored metric should be minimized or maximized
+        patience:
+            number of epochs to wait for an improvement before stopping
+        epsilon:
+            minimum improvement to consider as an actual improvement
+        mode:
+            whether the monitored metric should be minimized or maximized
     """
 
-    def __init__(self, patience: int, epsilon: float = 1e-4, mode: str = "min") -> None:
+    def __init__(
+        self,
+        patience: int,
+        epsilon: float = 1e-4,
+        mode: Literal["min", "max"] = "min",
+    ) -> None:
         assert mode in {"min", "max"}
 
         self.patience = patience
@@ -86,12 +98,18 @@ class ReduceLROnPlateau:
     ReduceLROnPlateau reduces the learning rate when a monitored metric has stopped improving.
 
     Args:
-        factor: factor by which the learning rate will be reduced (new_lr = old_lr * factor)
-        patience: number of epochs to wait for an improvement before reducing the learning rate
-        cooldown: number of epochs to wait after reducing the learning rate before resuming normal operation
-        mode: "min" or "max", whether the monitored metric should be minimized or maximized
-        epsilon: minimum improvement to consider as an actual improvement (default: 1e-4)
-        min_lr: minimum learning rate after reduction (default: 1e-6)
+        factor:
+            factor by which the learning rate will be reduced (new_lr = old_lr * factor)
+        patience:
+            number of epochs to wait for an improvement before reducing the learning rate
+        cooldown:
+            number of epochs to wait after reducing the learning rate before resuming normal operation
+        mode:
+            whether the monitored metric should be minimized or maximized
+        epsilon:
+            minimum improvement to consider as an actual improvement
+        min_lr:
+            minimum learning rate after reduction
     """
 
     def __init__(
@@ -99,7 +117,7 @@ class ReduceLROnPlateau:
         factor: float,
         patience: int,
         cooldown: int,
-        mode: str = "min",
+        mode: Literal["min", "max"] = "min",
         epsilon: float = 1e-4,
         min_lr: float = 1e-6,
     ) -> None:
@@ -147,12 +165,15 @@ class ReduceLROnPlateau:
 
 class TrainingCallback:
     """
-    TrainingCallback is a class that manages all of the training callbacks.
+    TrainingCallback is a class that orchestrate the provided callbacks.
 
     Args:
-        checkpoint: TrainCheckpoint instance for saving model checkpoints
-        early_stop: EarlyStopping instance for early stopping
-        lr_scheduler: ReduceLROnPlateau instance for learning rate scheduling
+        checkpoint:
+            `TrainCheckpoint` instance for saving model checkpoints
+        early_stop:
+            `EarlyStopping` instance for early stopping
+        lr_scheduler:
+            `ReduceLROnPlateau` instance for learning rate scheduling
     """
 
     def __init__(

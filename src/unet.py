@@ -6,16 +6,12 @@ import torchvision.models as models
 
 
 class DecoderBlock(nn.Module):
-    """
-    Decoder block that upsamples features and fuses with skip connections from the encoder.
-
-    Args:
-        in_channels: number of input channels from the previous layer
-        skip_channels: number of channels from the skip connection
-        out_channels: number of output channels for this block
-    """
-
-    def __init__(self, in_channels, skip_channels, out_channels):
+    def __init__(
+        self, 
+        in_channels, 
+        skip_channels, 
+        out_channels,
+    ):
         super().__init__()
 
         self.up_sample = nn.Upsample(
@@ -50,13 +46,6 @@ class DecoderBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    """
-    UNet Model.
-
-    Args:
-        num_classes: number of output classes for segmentation
-    """
-
     def __init__(self, num_classes):
         super().__init__()
 
@@ -100,14 +89,14 @@ class UNet(nn.Module):
         self.segmentation_head = nn.Conv2d(64, num_classes, kernel_size=1)
 
     def forward(self, x):
-        # Encoder
+        # encoder
         x0 = self.layer0(x)
         x1 = self.layer1(x0)
         x2 = self.layer2(x1)
         x3 = self.layer3(x2)
         x4 = self.layer4(x3)
 
-        # Decoder
+        # decoder
         d4 = self.decoder4(x4, x3)
         d3 = self.decoder3(d4, x2)
         d2 = self.decoder2(d3, x1)

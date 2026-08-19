@@ -30,8 +30,10 @@ class DeviceDataLoader:
     DeviceDataLoader is a wrapper around torch DataLoader that moves data to the specified device.
 
     Args:
-    - dl: torch DataLoader to wrap
-    - device: torch device to move data to
+        dl:
+            torch DataLoader to wrap
+        device:
+            torch device to move data to
     """
 
     def __init__(self, dl: DataLoader, device):
