@@ -12,22 +12,27 @@ training_config.random_seed = 42
 
 training_config.output_dir = "output"
 
-training_config.input_mode = "post"  # "post" or "pre_post"
+training_config.input_mode = "pre_post"  # "post" or "pre_post"
 training_config.in_channels = 3
 
-training_config.batch_size = 16
+training_config.batch_size = 32 # 16 or 32 works
 training_config.epochs = 20
 training_config.lr = 1e-3
 training_config.weight_decay = 1e-4
-training_config.label_smoothing = 0.1
 training_config.grad_clip = 1.0
 training_config.two_phase = True
-training_config.warmup_epochs = 5
+training_config.warmup_epochs = 3 # use smaller because imagenet != satellite imagery
 training_config.unfreeze_lr = 1e-4
-training_config.num_workers = 0
+
+training_config.label_smoothing = 0.1
 training_config.ce_weight = 1.0
 training_config.dice_weight = 1.0
 training_config.ignore_index = -1
+
+# preprocessing is heavy, increase this for faster data loading
+# the right number would be just enough worker to keep the GPU fed
+# slow data loading can be seen when low gpu usage and slower training
+training_config.num_workers = 4
 
 training_config.classes = {
     "background": {"id": 0, "weight": 0.2},
@@ -37,7 +42,7 @@ training_config.classes = {
     "destroyed": {"id": 4, "weight": 3.0},
 }
 
-training_config.early_stopping_patience = 5
+training_config.early_stopping_patience = 3
 training_config.ckpt_basename = "best_model"
 training_config.ckpt_format = ".pth"  # '.pth 'or '.pt'
 
